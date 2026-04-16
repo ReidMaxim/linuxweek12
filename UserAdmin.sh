@@ -2,8 +2,7 @@
 
 # ================================================
 # User Administration Script 
-#
-# Name format: "Last, First" (with comma and space)
+# Must be run with sudo!
 # ================================================
 
 # Configuration
@@ -11,24 +10,29 @@ LOG_FILE="/var/log/user_admin.log"
 PIN_LOG_DIR="/var/secure"
 PIN_LOG_FILE="${PIN_LOG_DIR}/user_pins.log"
 
-# Create secure directory if it doesn't exist (only root/owner can access)
+# Check if running as root
+if [[ $EUID -ne 0 ]]; then
+    echo "Error: This script must be run as root or with sudo."
+    echo "Usage: sudo $0 [OPTION] \"Last, First\""
+    exit 1
+fi
+
+# Create secure directory if it doesn't exist
 if [ ! -d "$PIN_LOG_DIR" ]; then
     mkdir -p "$PIN_LOG_DIR"
     chmod 700 "$PIN_LOG_DIR"
+    echo "Created secure PIN directory: $PIN_LOG_DIR"
 fi
 
 # Tier system 
-# junior   -> basic access
-# senior   -> inherits junior + more
-# management -> inherits senior + full admin capabilities
 declare -A TIERS
 TIERS["junior"]="junior"
 TIERS["senior"]="junior senior"
 TIERS["management"]="junior senior management"
 
-# Function: Log actions (with timestamp)
+# Function: Log actions
 log_action() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | sudo tee -a "$LOG_FILE" > /dev/null
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
 }
 
 # Function: Generate random 4-digit PIN
@@ -39,33 +43,32 @@ generate_pin() {
 # Function: Convert "Last, First" to username (e.g., "Dave, Cassidy" -> "dcassidy")
 name_to_username() {
     local name="$1"
-    # Remove spaces after comma, lowercase, take first letter of first + last name
     echo "$name" | sed 's/ *, */,/g' | tr '[:upper:]' '[:lower:]' | awk -F, '{print substr($2,1,1) $1}'
 }
 
 # Function: Display help
 show_help() {
     cat << EOF
-Usage: $0 [OPTION] "Last, First"
+-~~* THIS SCRIPT MUST BE RUN WITH SUDO DAVE! *~~-
+Usage: sudo $0 [OPTION] "Last, First"
 
 Options:
-  -h              Show this help message
-  -a "Last, First" Add a new user (prompts for tier)
-  -r "Last, First" Remove an existing user
-  -e "Last, First" Edit an existing user's tier/privileges
+  -h                    Show this help message
+  -a "Last, First"      Add a new user (prompts for tier)
+  -r "Last, First"      Remove an existing user
+  -e "Last, First"      Edit an existing user's tier/privileges
 
-Name must be in "Last, First" format (comma + space).
+Name format: "Last, First" (with comma and space)
 
-Tiers available:
-  junior     - Basic access (group: junior)
-  senior     - Team access (groups: junior, senior)
-  management - Full administrative access (groups: junior, senior, management)
+Tiers:
+  junior     - Basic access
+  senior     - Inherits junior + senior
+  management - Full admin capabilities
 
-The script automatically creates required groups if they don't exist.
 EOF
 }
 
-# Function: Check if name format is valid
+# Function: Check name format
 validate_name() {
     if [[ ! "$1" =~ ^[A-Za-z]+,[[:space:]]*[A-Za-z]+$ ]]; then
         echo "Error: Name must be in format \"Last, First\" (e.g., \"Smith, John\")"
@@ -78,14 +81,18 @@ validate_name() {
 ensure_groups() {
     for group in junior senior management; do
         if ! getent group "$group" > /dev/null; then
-            groupadd "$group"
-            log_action "Created group: $group"
-            echo "Created group: $group"
+            if groupadd "$group"; then
+                log_action "Created group: $group"
+                echo "Created group: $group"
+            else
+                echo "Warning: Failed to create group $group"
+            fi
         fi
     done
 }
 
-# Main script logic
+# ====================== MAIN ======================
+
 if [ $# -eq 0 ]; then
     show_help
     exit 0
@@ -115,7 +122,6 @@ case "$OPTION" in
             exit 1
         fi
 
-        # Prompt for tier
         echo "Available tiers: junior, senior, management"
         read -p "Enter tier for $NAME ($USERNAME): " TIER
         TIER=$(echo "$TIER" | tr '[:upper:]' '[:lower:]')
@@ -125,7 +131,6 @@ case "$OPTION" in
             exit 1
         fi
 
-        # Create user with home directory and bash shell
         if useradd -m -s /bin/bash "$USERNAME"; then
             log_action "Created user: $USERNAME ($NAME) with tier $TIER"
             echo "User $USERNAME created successfully."
@@ -134,32 +139,30 @@ case "$OPTION" in
             exit 1
         fi
 
-        # Add user to appropriate groups
+        # Add to groups
         for group in ${TIERS[$TIER]}; do
             usermod -aG "$group" "$USERNAME"
             log_action "Added $USERNAME to group: $group"
         done
 
-        # Generate 4-digit PIN as initial password
+        # Generate and set PIN as password
         PIN=$(generate_pin)
         echo "$USERNAME:$PIN" | chpasswd
 
-        # Log PIN securely (only owner can access)
+        # Secure logging of PIN
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] User: $USERNAME ($NAME) | Tier: $TIER | PIN: $PIN" >> "$PIN_LOG_FILE"
         chmod 600 "$PIN_LOG_FILE"
 
         echo "========================================"
         echo "User created: $USERNAME"
         echo "Initial PIN (password): $PIN"
-        echo "This PIN has been logged securely in $PIN_LOG_FILE"
+        echo "PIN logged securely in: $PIN_LOG_FILE"
         echo "========================================"
         ;;
 
     -r)
         NAME="$1"
-        if ! validate_name "$NAME"; then
-            exit 1
-        fi
+        if ! validate_name "$NAME"; then exit 1; fi
 
         USERNAME=$(name_to_username "$NAME")
 
@@ -185,9 +188,7 @@ case "$OPTION" in
 
     -e)
         NAME="$1"
-        if ! validate_name "$NAME"; then
-            exit 1
-        fi
+        if ! validate_name "$NAME"; then exit 1; fi
 
         USERNAME=$(name_to_username "$NAME")
 
@@ -210,7 +211,7 @@ case "$OPTION" in
             exit 1
         fi
 
-        # Remove from all tier groups first
+        # Remove from all tier groups
         for group in junior senior management; do
             gpasswd -d "$USERNAME" "$group" 2>/dev/null
         done
